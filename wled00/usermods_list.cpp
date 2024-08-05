@@ -117,6 +117,10 @@
   #include "../usermods/seven_segment_display/usermod_v2_seven_segment_display.h"
 #endif
 
+#ifdef USERMOD_CANOPEN
+  #include "../usermods/canopen/usermod_canopen.h"
+#endif
+
 #ifdef USERMOD_SSDR
   #include "../usermods/seven_segment_display_reloaded/usermod_seven_segment_reloaded.h"
 #endif
@@ -302,6 +306,10 @@ void registerUsermods()
 
   #ifdef USERMOD_SEVEN_SEGMENT
   usermods.add(new SevenSegmentDisplay());
+  #endif
+
+  #ifdef USERMOD_CANOPEN
+  usermods.add(new CanopenUsermod());
   #endif
 
   #ifdef USERMOD_SSDR
