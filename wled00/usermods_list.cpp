@@ -117,10 +117,6 @@
   #include "../usermods/seven_segment_display/usermod_v2_seven_segment_display.h"
 #endif
 
-#ifdef USERMOD_CANOPEN
-  #include "../usermods/canopen/usermod_canopen.h"
-#endif
-
 #ifdef USERMOD_SSDR
   #include "../usermods/seven_segment_display_reloaded/usermod_seven_segment_reloaded.h"
 #endif
@@ -208,6 +204,11 @@
 #ifdef USERMOD_STAIRCASE_WIPE
 #include "../usermods/stairway_wipe_basic/stairway-wipe-usermod-v2.h"
 #endif
+
+#ifdef USERMOD_CANOPEN
+  #include "../usermods/canopen/usermod_canopen.h"
+#endif
+
 void registerUsermods()
 {
 /*
@@ -308,10 +309,6 @@ void registerUsermods()
   usermods.add(new SevenSegmentDisplay());
   #endif
 
-  #ifdef USERMOD_CANOPEN
-  usermods.add(new CanopenUsermod());
-  #endif
-
   #ifdef USERMOD_SSDR
   usermods.add(new UsermodSSDR());
   #endif
@@ -394,5 +391,9 @@ void registerUsermods()
 
   #ifdef USERMOD_STAIRCASE_WIPE
   usermods.add(new StairwayWipeUsermod());
+  #endif
+
+  #ifdef USERMOD_CANOPEN
+  usermods.add(new CanopenUsermod());
   #endif
 }
