@@ -4,6 +4,8 @@ Usermod to allow WLED to receive configuration and events through a CANOpen inte
 
 CANopen is a high-level communication protocol and device profile specification that is based on the CAN (Controller Area Network) protocol. The protocol was developed for embedded networking applications, such as in-vehicle networks.
 
+CANOpen® is a registered trademark of CAN in Automation (CiA). This code is in no way affiliated with CiA. No warranty is provided - use at your own risk.
+
 ## Installation
 
 Add the compile-time option `-D USERMOD_CANOPEN` to your `platformio.ini` (or `platformio_override.ini`) or use `#define USERMOD_CANOPEN` in `my_config.h`.
