@@ -1,12 +1,12 @@
 #pragma once
 
 
-#ifndef CAN_TX
-  #define CAN_TX    19
-#endif
-
 #ifndef CAN_RX
   #define CAN_RX    18
+#endif
+
+#ifndef CAN_TX
+  #define CAN_TX    19
 #endif
 
 #ifndef LED_GPIO_ERROR
@@ -21,19 +21,12 @@
   #define LED_GPIO_HEARTBEAT  2
 #endif
 
+
 /**
  * START --- CANOPEN DEFINES
  */
-#define NODE_ID 0x66 // 102  This nodes ID
-
-#define SENDER_NODE_ID 0x25 // 37
-#define DAM_PDO_ID (SENDER_NODE_ID | DAM_PDO_MASK)
-
-#define MASTER_CAN_ADDRESS 0x01
-#define UNJO_CAN_ADDRESS  0x66
-
-#define WLED_COB_ID (R_PDO4 | NODE_ID)
-#define HEARTBEAT_COB_ID (NMT_ERROR_CONTROL | MASTER_CAN_ADDRESS)
+#define DEFAULT_NODE_ID 0x66 // 102  This nodes ID
+#define DEFAULT_CONTROLLER_NODE_ID 0x25 // 37
 
 // Color is @ 0x2100:00
 #define MPDO_COLOR_INDEX_MSB 0x2F
@@ -72,25 +65,24 @@ class CanopenUsermod : public Usermod
 
 private:
   
-  bool enabled = false;
-  bool initDone = false;
-
-  // These config variables have defaults set inside readFromConfig()
-  int8_t nodeId;
-  int8_t testPins[5];
-
   // string that are used multiple time (this will save some flash memory)
   static const char _name[];
   static const char _enabled[];
+  static const char _node_id[];
+  static const char _controller_id[];
 
+  // These config variables have defaults set inside readFromConfig()
+  bool enabled = true;
+  uint8_t nodeId;
+  uint8_t controllerNodeId;
+
+  //Runtime variables.
+  bool initDone = false;
+  unsigned long lastRefresh = 0;
   CanFrame rxFrame;
   int heartbeatState = LOW;
   int statusState = LOW;
   unsigned long lastHeartbeat = millis();
-
-  //Runtime variables.
-  unsigned long lastRefresh = 0;
-  unsigned int ssNodeId = NODE_ID;
 
   /**
    * Configure a GPIO pin as output.
@@ -111,7 +103,7 @@ private:
 
   boolean isColorMpdo()
   {
-      return  rxFrame.data[0] == DAM_PDO_ID && \
+      return  rxFrame.data[0] == (controllerNodeId | DAM_PDO_MASK) && \
               rxFrame.data[1] == MPDO_COLOR_INDEX_LSB && \
               rxFrame.data[2] == MPDO_COLOR_INDEX_MSB && \
               rxFrame.data[3] == MPDO_COLOR_SUBINDEX;
@@ -119,7 +111,7 @@ private:
 
   boolean isFadeTimeMpdo()
   {
-      return  rxFrame.data[0] == DAM_PDO_ID && \
+      return  rxFrame.data[0] == (controllerNodeId | DAM_PDO_MASK) && \
               rxFrame.data[1] == MPDO_FADE_TIME_INDEX_LSB && \
               rxFrame.data[2] == MPDO_FADE_TIME_INDEX_MSB && \
               rxFrame.data[3] == MPDO_FADE_TIME_SUBINDEX;
@@ -127,7 +119,7 @@ private:
 
   boolean isEffectMpdo()
   {
-      return  rxFrame.data[0] == DAM_PDO_ID && \
+      return  rxFrame.data[0] == (controllerNodeId | DAM_PDO_MASK) && \
               rxFrame.data[1] == MPDO_EFFECT_INDEX_LSB && \
               rxFrame.data[2] == MPDO_EFFECT_INDEX_MSB && \
               rxFrame.data[3] == MPDO_EFFECT_SUBINDEX;
@@ -161,6 +153,8 @@ public:
     ESP32Can.setSpeed(ESP32Can.convertSpeed(250));
 
     ESP32Can.begin();
+    
+    initDone = true;
   }
 
   /*
@@ -194,7 +188,7 @@ public:
 
     if(ESP32Can.readFrame(rxFrame, CAN_READ_TIMEOUT))
     {
-       if(rxFrame.identifier == WLED_COB_ID)
+       if(rxFrame.identifier == (R_PDO4 | nodeId))
        {
             if (isColorMpdo())
             {
@@ -250,115 +244,43 @@ public:
 
     /*
      * addToJsonInfo() can be used to add custom entries to the /json/info part of the JSON API.
-     * Creating an "u" object allows you to add custom key/value pairs to the Info section of the WLED web UI.
-     * Below it is shown how this could be used for e.g. a light sensor
      */
     void addToJsonInfo(JsonObject& root)
     {
-      // if "u" object does not exist yet wee need to create it
+      // Check if the "u" object exists; if not, create it
       JsonObject user = root["u"];
-      if (user.isNull()) user = root.createNestedObject("u");
-
-      //this code adds "u":{"ExampleUsermod":[20," lux"]} to the info object
-      //int reading = 20;
-      //JsonArray lightArr = user.createNestedArray(FPSTR(_name))); //name
-      //lightArr.add(reading); //value
-      //lightArr.add(F(" lux")); //unit
-
-      // if you are implementing a sensor usermod, you may publish sensor data
-      //JsonObject sensor = root[F("sensor")];
-      //if (sensor.isNull()) sensor = root.createNestedObject(F("sensor"));
-      //temp = sensor.createNestedArray(F("light"));
-      //temp.add(reading);
-      //temp.add(F("lux"));
-    }
-
-
-    /*
-     * addToJsonState() can be used to add custom entries to the /json/state part of the JSON API (state object).
-     * Values in the state object may be modified by connected clients
-     */
-    void addToJsonState(JsonObject& root)
-    {
-      if (!initDone || !enabled) return;  // prevent crash on boot applyPreset()
-
-      JsonObject usermod = root[FPSTR(_name)];
-      if (usermod.isNull()) usermod = root.createNestedObject(FPSTR(_name));
-
-      //usermod["user0"] = userVar0;
-    }
-
-
-    /*
-     * readFromJsonState() can be used to receive data clients send to the /json/state part of the JSON API (state object).
-     * Values in the state object may be modified by connected clients
-     */
-    void readFromJsonState(JsonObject& root)
-    {
-      if (!initDone) return;  // prevent crash on boot applyPreset()
-
-      JsonObject usermod = root[FPSTR(_name)];
-      if (!usermod.isNull()) {
-        // expect JSON usermod data in usermod name object: {"ExampleUsermod:{"user0":10}"}
-        userVar0 = usermod["user0"] | userVar0; //if "user0" key exists in JSON, update, else keep old value
+      if (user.isNull()) {
+          user = root.createNestedObject("u");
       }
-      // you can as well check WLED state JSON keys
-      //if (root["bri"] == 255) Serial.println(F("Don't burn down your garage!"));
+
+      // Create or access the "CANOpen" object within "u"
+      JsonObject canOpen = user[PSTR(CanopenUsermod::_name)];
+      if (canOpen.isNull()) {
+          canOpen = user.createNestedObject(FPSTR(CanopenUsermod::_name));
+      }
+
+      // Add the "NodeId" entry to the "CANOpen" object
+      canOpen[FPSTR(CanopenUsermod::_node_id)] = nodeId;
+      // Add the "Controller NodeId" entry to the "CANOpen" object
+      canOpen[FPSTR(CanopenUsermod::_controller_id)] = controllerNodeId;
     }
+
 
     /*
      * addToConfig() can be used to add custom persistent settings to the cfg.json file in the "um" (usermod) object.
      * It will be called by WLED when settings are actually saved (for example, LED settings are saved)
      * If you want to force saving the current state, use serializeConfig() in your loop().
-     * 
-     * CAUTION: serializeConfig() will initiate a filesystem write operation.
-     * It might cause the LEDs to stutter and will cause flash wear if called too often.
-     * Use it sparingly and always in the loop, never in network callbacks!
-     * 
-     * addToConfig() will make your settings editable through the Usermod Settings page automatically.
-     *
-     * Usermod Settings Overview:
-     * - Numeric values are treated as floats in the browser.
-     *   - If the numeric value entered into the browser contains a decimal point, it will be parsed as a C float
-     *     before being returned to the Usermod.  The float data type has only 6-7 decimal digits of precision, and
-     *     doubles are not supported, numbers will be rounded to the nearest float value when being parsed.
-     *     The range accepted by the input field is +/- 1.175494351e-38 to +/- 3.402823466e+38.
-     *   - If the numeric value entered into the browser doesn't contain a decimal point, it will be parsed as a
-     *     C int32_t (range: -2147483648 to 2147483647) before being returned to the usermod.
-     *     Overflows or underflows are truncated to the max/min value for an int32_t, and again truncated to the type
-     *     used in the Usermod when reading the value from ArduinoJson.
-     * - Pin values can be treated differently from an integer value by using the key name "pin"
-     *   - "pin" can contain a single or array of integer values
-     *   - On the Usermod Settings page there is simple checking for pin conflicts and warnings for special pins
-     *     - Red color indicates a conflict.  Yellow color indicates a pin with a warning (e.g. an input-only pin)
-     *   - Tip: use int8_t to store the pin value in the Usermod, so a -1 value (pin not set) can be used
-     *
-     * See usermod_v2_auto_save.h for an example that saves Flash space by reusing ArduinoJson key name strings
-     * 
-     * If you need a dedicated settings page with custom layout for your Usermod, that takes a lot more work.  
-     * You will have to add the setting to the HTML, xml.cpp and set.cpp manually.
-     * See the WLED Soundreactive fork (code and wiki) for reference.  https://github.com/atuline/WLED
-     * 
-     * I highly recommend checking out the basics of ArduinoJson serialization and deserialization in order to use custom settings!
      */
     void addToConfig(JsonObject& root)
     {
       JsonObject top = root.createNestedObject(FPSTR(_name));
       top[FPSTR(_enabled)] = enabled;
-
-      top["Node ID"] = nodeId;
-
-      JsonArray pinArray = top.createNestedArray("pin");
-      pinArray.add(testPins[0]);
-      pinArray.add(testPins[1]);
-      pinArray.add(testPins[2]);
-      pinArray.add(testPins[3]);
-      pinArray.add(testPins[4]);
+      top[FPSTR(_node_id)] = nodeId;
+      top[FPSTR(_controller_id)] = controllerNodeId;
     }
 
 
     /*
-     * readFromConfig() can be used to read back the custom settings you added with addToConfig().
      * This is called by WLED when settings are loaded (currently this only happens immediately after boot, or after saving on the Usermod Settings page)
      * 
      * readFromConfig() is called BEFORE setup(). This means you can use your persistent values in setup() (e.g. pin assignments, buffer sizes),
@@ -374,24 +296,12 @@ public:
      */
     bool readFromConfig(JsonObject& root)
     {
-      // default settings values could be set here (or below using the 3-argument getJsonValue()) instead of in the class definition or constructor
-      // setting them inside readFromConfig() is slightly more robust, handling the rare but plausible use case of single value being missing after boot (e.g. if the cfg.json was manually edited and a value was removed)
-
       JsonObject top = root[FPSTR(_name)];
 
       bool configComplete = !top.isNull();
-
-      configComplete &= getJsonValue(top["enabled"], enabled, true);
-      
-      // A 3-argument getJsonValue() assigns the 3rd argument as a default value if the Json value is missing
-      configComplete &= getJsonValue(top["node_id"], nodeId, NODE_ID);  
-      
-      // "pin" fields have special handling in settings page (or some_pin as well)
-      configComplete &= getJsonValue(top["pin_can_rx"][0], testPins[0], CAN_TX);
-      configComplete &= getJsonValue(top["pin_can_tx"][1], testPins[1], CAN_RX);
-      configComplete &= getJsonValue(top["pin_error_led"][1], testPins[2], LED_GPIO_ERROR);
-      configComplete &= getJsonValue(top["pin_status_led"][1], testPins[3], LED_GPIO_STATUS);
-      configComplete &= getJsonValue(top["pin_heartbeat_led"][1], testPins[4], LED_GPIO_HEARTBEAT);
+      configComplete &= getJsonValue(top[FPSTR(_enabled)], enabled, true);
+      configComplete &= getJsonValue(top[FPSTR(_node_id)], nodeId, DEFAULT_NODE_ID);
+      configComplete &= getJsonValue(top[FPSTR(_controller_id)], controllerNodeId, DEFAULT_CONTROLLER_NODE_ID);
 
       return configComplete;
     }
@@ -409,4 +319,6 @@ public:
 
 // add more strings here to reduce flash memory usage
 const char CanopenUsermod::_name[]    PROGMEM = "CANOpen";
-const char CanopenUsermod::_enabled[] PROGMEM = "enabled";
+const char CanopenUsermod::_enabled[] PROGMEM = "Enabled";
+const char CanopenUsermod::_node_id[] PROGMEM = "NodeId";
+const char CanopenUsermod::_controller_id[] PROGMEM = "NodeId of Controller";

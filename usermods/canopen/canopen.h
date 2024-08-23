@@ -37,4 +37,8 @@
 // Destination Address Mode bit mask
 #define DAM_PDO_MASK 0x80
 
+#define MASTER_CAN_ADDRESS 0x01
+#define HEARTBEAT_COB_ID (NMT_ERROR_CONTROL | MASTER_CAN_ADDRESS)
+
+
 #endif  // canopen_h
