@@ -9,6 +9,14 @@
   #define CAN_TX    19
 #endif
 
+#ifndef CAN_RX_BUFFER_SIZE
+  #define CAN_RX_BUFFER_SIZE 3
+#endif
+
+#ifndef CAN_TX_BUFFER_SIZE
+  #define CAN_TX_BUFFER_SIZE 0
+#endif
+
 #ifndef LED_GPIO_ERROR
   #define LED_GPIO_ERROR      4
 #endif
@@ -20,6 +28,7 @@
 #ifndef LED_GPIO_HEARTBEAT
   #define LED_GPIO_HEARTBEAT  2
 #endif
+
 
 
 /**
@@ -50,6 +59,7 @@
 #define HEARTBEAT_TIMEOUT 2000
 #define CAN_READ_TIMEOUT 0
 
+#define TWAI_FILTER_CONFIG() {.acceptance_code = 0, .acceptance_mask = 0xFFFFFFFF, .single_filter = true}
 /**
  * END --- CANOPEN DEFINES
  */
@@ -58,7 +68,7 @@
 #include "driver/gpio.h"
 #include "wled.h"
 #include "canopen.h"
-#include <ESP32-TWAI-CAN.hpp>
+#include "driver/twai.h"
 
 class CanopenUsermod : public Usermod
 {
@@ -71,15 +81,17 @@ private:
   static const char _node_id[];
   static const char _controller_id[];
 
+
   // These config variables have defaults set inside readFromConfig()
   bool enabled = true;
+  bool isTwaiDriverInstalled = false;
   uint8_t nodeId;
   uint8_t controllerNodeId;
 
   //Runtime variables.
   bool initDone = false;
   unsigned long lastRefresh = 0;
-  CanFrame rxFrame;
+  twai_message_t rxFrame;
   int heartbeatState = LOW;
   int statusState = LOW;
   unsigned long lastHeartbeat = millis();
@@ -125,6 +137,81 @@ private:
               rxFrame.data[3] == MPDO_EFFECT_SUBINDEX;
   }
 
+  bool end() {
+    bool ret = false;
+    if(isTwaiDriverInstalled) {
+        //Stop the TWAI driver
+        if (twai_stop() == ESP_OK) {
+            DEBUG_PRINTLN("Driver stopped\n");
+            ret = true;
+        } else {
+            DEBUG_PRINTLN("Failed to stop driver\n");
+        }
+
+        //Uninstall the TWAI driver
+        if (twai_driver_uninstall() == ESP_OK) {
+            DEBUG_PRINTLN("Driver uninstalled\n");
+            ret &= true;
+        } else {
+            DEBUG_PRINTLN("Failed to uninstall driver\n");
+            ret &= false;
+        }
+        isTwaiDriverInstalled = !ret;
+    } else ret = true;
+    return ret;
+  }
+
+  boolean begin() {
+    bool ret = false;
+    if (end()) {
+        isTwaiDriverInstalled = true;
+        twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+        twai_general_config_t g_config = {
+            .mode = TWAI_MODE_LISTEN_ONLY,
+            .tx_io = (gpio_num_t)CAN_TX,
+            .rx_io = (gpio_num_t)CAN_RX,
+            .clkout_io = TWAI_IO_UNUSED,
+            .bus_off_io = TWAI_IO_UNUSED,
+            .tx_queue_len = CAN_TX_BUFFER_SIZE,
+            .rx_queue_len = CAN_RX_BUFFER_SIZE,
+            .alerts_enabled = TWAI_ALERT_NONE,
+            .clkout_divider = 0,
+            .intr_flags = ESP_INTR_FLAG_LEVEL1
+        };
+        twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
+
+        // Install TWAI driver
+        if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
+            DEBUG_PRINTLN("TWAI Driver installed");
+
+
+        } else {
+            DEBUG_PRINTLN("Failed to install TWAI driver");
+        }
+
+        // Start TWAI driver
+        if (twai_start() == ESP_OK) {
+            DEBUG_PRINTLN("TWAI Driver started");
+            ret = true;
+        } else {
+            DEBUG_PRINTLN("Failed to start TWAI driver");
+        }
+
+        if (!ret) end();
+    }
+
+    return ret;
+  }
+
+  inline bool IRAM_ATTR readFrame(twai_message_t* frame, uint32_t timeout = 1000) {
+      bool ret = false;
+      if((frame) && twai_receive(frame, pdMS_TO_TICKS(timeout)) == ESP_OK) {
+          ret = true;
+      }
+      return ret;
+  }
+
+
 public:
   //Functions called by WLED
 
@@ -143,17 +230,7 @@ public:
     digitalWrite(LED_GPIO_STATUS, LOW);
     digitalWrite(LED_GPIO_HEARTBEAT, LOW);
 
-    // Set pins
-    ESP32Can.setPins(CAN_TX, CAN_RX);
-    // You can set custom size for the queues - those are default
-    ESP32Can.setRxQueueSize(5);
-    ESP32Can.setTxQueueSize(5);
-    // .setSpeed() and .begin() functions require to use TwaiSpeed enum,
-    // but you can easily convert it from numerical value using .convertSpeed()
-    ESP32Can.setSpeed(ESP32Can.convertSpeed(250));
-
-    ESP32Can.begin();
-    
+    begin();
     initDone = true;
   }
 
@@ -163,7 +240,7 @@ public:
   void loop()
   {
 
-  if (millis() < lastHeartbeat + HEARTBEAT_TIMEOUT)
+    if (millis() < lastHeartbeat + HEARTBEAT_TIMEOUT)
     {
         if (statusState == LOW)
         {
@@ -185,8 +262,9 @@ public:
             digitalWrite(LED_GPIO_HEARTBEAT, LOW);
         }
     }
+    
 
-    if(ESP32Can.readFrame(rxFrame, CAN_READ_TIMEOUT))
+    while(readFrame(&rxFrame, CAN_READ_TIMEOUT))
     {
        if(rxFrame.identifier == (R_PDO4 | nodeId))
        {
@@ -226,6 +304,7 @@ public:
        {
             if (rxFrame.data[0] == NMT_ERROR_CONTROL_STATE_OPERATIONAL)
             {
+                // DEBUG_PRINTLN("Received CANOpen heartbeat");
                 if (heartbeatState == LOW)
                 {
                     heartbeatState = HIGH;
