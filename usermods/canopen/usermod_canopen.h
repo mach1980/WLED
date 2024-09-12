@@ -1,22 +1,5 @@
 #pragma once
 
-
-#ifndef CAN_RX
-  #define CAN_RX    18
-#endif
-
-#ifndef CAN_TX
-  #define CAN_TX    19
-#endif
-
-#ifndef CAN_RX_BUFFER_SIZE
-  #define CAN_RX_BUFFER_SIZE 3
-#endif
-
-#ifndef CAN_TX_BUFFER_SIZE
-  #define CAN_TX_BUFFER_SIZE 0
-#endif
-
 #ifndef LED_GPIO_ERROR
   #define LED_GPIO_ERROR      4
 #endif
@@ -30,45 +13,21 @@
 #endif
 
 
-
-/**
- * START --- CANOPEN DEFINES
- */
-#define DEFAULT_NODE_ID 0x66 // 102  This nodes ID
-#define DEFAULT_CONTROLLER_NODE_ID 0x25 // 37
-
-// Color is @ 0x2100:00
-#define MPDO_COLOR_INDEX_MSB 0x2F
-#define MPDO_COLOR_INDEX_LSB 0x00
-#define MPDO_COLOR_SUBINDEX 0x00
-
-// Fade time is at 0x2101:00
-#define MPDO_FADE_TIME_INDEX_MSB 0x2F
-#define MPDO_FADE_TIME_INDEX_LSB 0x01
-#define MPDO_FADE_TIME_SUBINDEX 0x00
-
-// Type of effect is at 0x2110:00
-#define MPDO_EFFECT_INDEX_MSB 0x2F
-#define MPDO_EFFECT_INDEX_LSB 0x10
-#define MPDO_EFFECT_SUBINDEX 0x00
-
-#define MDPO_NO_OF_LEDS_INDEX_MSB 0x2F
-#define MDPO_NO_OF_LEDS_INDEX_LSB 0x10
-#define MPDO_NO_OF_LEDS_SUBINDEX 0x01
-
-#define HEARTBEAT_TIMEOUT 2000
-#define CAN_READ_TIMEOUT 0
-
-#define TWAI_FILTER_CONFIG() {.acceptance_code = 0, .acceptance_mask = 0xFFFFFFFF, .single_filter = true}
-/**
- * END --- CANOPEN DEFINES
- */
-
-
-#include "driver/gpio.h"
 #include "wled.h"
-#include "canopen.h"
+#include "driver/gpio.h"
 #include "driver/twai.h"
+#include "can.h"
+#include "canopen.h"
+#include "SdoHandler.h"
+#include "PdoHandler.h"
+
+typedef struct {
+  uint8_t errorLed;
+  uint8_t statusLed;
+  uint8_t heartbeatLed;
+
+  bool isMainLightsOn;
+} canopen_ui_state_t;
 
 class CanopenUsermod : public Usermod
 {
@@ -76,25 +35,33 @@ class CanopenUsermod : public Usermod
 private:
   
   // string that are used multiple time (this will save some flash memory)
-  static const char _name[];
-  static const char _enabled[];
-  static const char _node_id[];
-  static const char _controller_id[];
-
+  static const char _NAME_STR[];
+  static const char _ENABLED_STR[];
+  static const char _NODE_ID_STR[];
+  static const char _CONTROLLER_ID_STR[];
 
   // These config variables have defaults set inside readFromConfig()
-  bool enabled = true;
-  bool isTwaiDriverInstalled = false;
-  uint8_t nodeId;
-  uint8_t controllerNodeId;
+  bool _enabled = true;
+  uint8_t _nodeId;
+  uint8_t _controllerNodeId;
 
   //Runtime variables.
   bool initDone = false;
+
+  bool transmitting = false;
+
   unsigned long lastRefresh = 0;
-  twai_message_t rxFrame;
-  int heartbeatState = LOW;
-  int statusState = LOW;
-  unsigned long lastHeartbeat = millis();
+  
+  nmt_handle_t nmt = {
+        .state = NMTState::PRE_OPERATIONAL,
+        .lastSentHeartbeat = 0,
+        .lastReceivedHeartbeat = 0
+    };
+
+  canopen_ui_state_t uiState = {LOW, LOW, LOW, false};
+
+  SdoHandler _sdoHandler = {};
+  PdoHandler _pdoHandler = {};
 
   /**
    * Configure a GPIO pin as output.
@@ -110,105 +77,24 @@ private:
       gpio_output_set( 1 << pin, 0 << pin, 1 << pin ,0);
       gpio_matrix_out(pin, SIG_GPIO_OUT_IDX, false, false);
       gpio_pad_select_gpio(pin);
-      digitalWrite(pin, HIGH);
   }
 
-  boolean isColorMpdo()
-  {
-      return  rxFrame.data[0] == (controllerNodeId | DAM_PDO_MASK) && \
-              rxFrame.data[1] == MPDO_COLOR_INDEX_LSB && \
-              rxFrame.data[2] == MPDO_COLOR_INDEX_MSB && \
-              rxFrame.data[3] == MPDO_COLOR_SUBINDEX;
-  }
-
-  boolean isFadeTimeMpdo()
-  {
-      return  rxFrame.data[0] == (controllerNodeId | DAM_PDO_MASK) && \
-              rxFrame.data[1] == MPDO_FADE_TIME_INDEX_LSB && \
-              rxFrame.data[2] == MPDO_FADE_TIME_INDEX_MSB && \
-              rxFrame.data[3] == MPDO_FADE_TIME_SUBINDEX;
-  }
-
-  boolean isEffectMpdo()
-  {
-      return  rxFrame.data[0] == (controllerNodeId | DAM_PDO_MASK) && \
-              rxFrame.data[1] == MPDO_EFFECT_INDEX_LSB && \
-              rxFrame.data[2] == MPDO_EFFECT_INDEX_MSB && \
-              rxFrame.data[3] == MPDO_EFFECT_SUBINDEX;
-  }
-
-  bool end() {
-    bool ret = false;
-    if(isTwaiDriverInstalled) {
-        //Stop the TWAI driver
-        if (twai_stop() == ESP_OK) {
-            DEBUG_PRINTLN("Driver stopped\n");
-            ret = true;
-        } else {
-            DEBUG_PRINTLN("Failed to stop driver\n");
-        }
-
-        //Uninstall the TWAI driver
-        if (twai_driver_uninstall() == ESP_OK) {
-            DEBUG_PRINTLN("Driver uninstalled\n");
-            ret &= true;
-        } else {
-            DEBUG_PRINTLN("Failed to uninstall driver\n");
-            ret &= false;
-        }
-        isTwaiDriverInstalled = !ret;
-    } else ret = true;
-    return ret;
-  }
-
-  boolean begin() {
-    bool ret = false;
-    if (end()) {
-        isTwaiDriverInstalled = true;
-        twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
-        twai_general_config_t g_config = {
-            .mode = TWAI_MODE_LISTEN_ONLY,
-            .tx_io = (gpio_num_t)CAN_TX,
-            .rx_io = (gpio_num_t)CAN_RX,
-            .clkout_io = TWAI_IO_UNUSED,
-            .bus_off_io = TWAI_IO_UNUSED,
-            .tx_queue_len = CAN_TX_BUFFER_SIZE,
-            .rx_queue_len = CAN_RX_BUFFER_SIZE,
-            .alerts_enabled = TWAI_ALERT_NONE,
-            .clkout_divider = 0,
-            .intr_flags = ESP_INTR_FLAG_LEVEL1
-        };
-        twai_timing_config_t t_config = TWAI_TIMING_CONFIG_250KBITS();
-
-        // Install TWAI driver
-        if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
-            DEBUG_PRINTLN("TWAI Driver installed");
-
-
-        } else {
-            DEBUG_PRINTLN("Failed to install TWAI driver");
-        }
-
-        // Start TWAI driver
-        if (twai_start() == ESP_OK) {
-            DEBUG_PRINTLN("TWAI Driver started");
-            ret = true;
-        } else {
-            DEBUG_PRINTLN("Failed to start TWAI driver");
-        }
-
-        if (!ret) end();
-    }
-
-    return ret;
-  }
-
-  inline bool IRAM_ATTR readFrame(twai_message_t* frame, uint32_t timeout = 1000) {
-      bool ret = false;
-      if((frame) && twai_receive(frame, pdMS_TO_TICKS(timeout)) == ESP_OK) {
-          ret = true;
-      }
-      return ret;
+  /**
+   * Check if there are messages waiting for transmission in the TWAI driver.
+   *
+   * This function retrieves the current status information of the TWAI driver using
+   * `twai_get_status_info()` and checks if there are any messages queued for transmission.
+   * It returns `true` if there are messages waiting for transmission, and `false` otherwise.
+   *
+   * @param[in,out]  s  Pointer to a `twai_status_info_t` structure that will be filled 
+   *                    with the current status information of the TWAI driver.
+   *
+   * @return
+   *      - `true` if there are messages queued for transmission (`msgs_to_tx > 0`).
+   *      - `false` if there are no messages queued for transmission or if `twai_get_status_info()` fails.
+   */
+  bool hasWaitingTx(twai_status_info_t *s) {
+    return (ESP_OK == twai_get_status_info(s)) && (s->msgs_to_tx > 0);
   }
 
 
@@ -225,13 +111,33 @@ public:
     setupOutputLedPin(LED_GPIO_STATUS);
     setupOutputLedPin(LED_GPIO_HEARTBEAT);
 
+    digitalWrite(LED_GPIO_ERROR, HIGH);
+    digitalWrite(LED_GPIO_STATUS, HIGH);
+    digitalWrite(LED_GPIO_HEARTBEAT, HIGH);
+
     delay(1000);
+
+    DEBUG_PRINTF("Starting CANOpen node with node id %u\n", _nodeId);
+    begin(TWAI_MODE_NORMAL);
+
+
+    /**
+    twai_message_t frame = buildSyncronizationFrame();
+    transmitting = true;
+    esp_err_t e = twai_transmit(&frame, pdMS_TO_TICKS(1000));
+    if (e != ESP_OK)
+    {
+      DEBUG_PRINTF("Failed to enqueue Synchronization frame! Error code %u \n", e);
+    }
+     */
+
     digitalWrite(LED_GPIO_ERROR, LOW);
     digitalWrite(LED_GPIO_STATUS, LOW);
     digitalWrite(LED_GPIO_HEARTBEAT, LOW);
 
-    begin();
-    initDone = true;
+    _sdoHandler.onSetup(_nodeId);
+    _pdoHandler.onSetup(_nodeId, _controllerNodeId);
+
   }
 
   /*
@@ -240,84 +146,115 @@ public:
   void loop()
   {
 
-    if (millis() < lastHeartbeat + HEARTBEAT_TIMEOUT)
+    unsigned long currentTime = millis();
+
+    twai_message_t rxFrame;
+    twai_status_info_t status = {};
+
+    // The loop will continue running if:
+    //   - There are no messages waiting for transmission (msgs_to_tx == 0).
+    //   - A message is successfully received from the TWAI driver (twai_receive returns ESP_OK).
+    while(!hasWaitingTx(&status) && (twai_receive(&rxFrame, 0) == ESP_OK))
     {
-        if (statusState == LOW)
-        {
-            // Going from state from heartbeat timeout to running
-            statusState = HIGH;
-            digitalWrite(LED_GPIO_ERROR, LOW);
-            digitalWrite(LED_GPIO_STATUS, HIGH);
-        }
+       if(rxFrame.identifier == (R_PDO4 | _nodeId))
+       {
+
+       }
+       else if (isNmtErrorControlHeartbeat(rxFrame))
+       {
+          // Recieved a heartbeat from the CANOpen master
+          // DEBUG_PRINTLN("Recieved heartbeat");
+          nmt.lastReceivedHeartbeat = currentTime;
+       }
+       else if (isNmtCommandFrame(rxFrame, _nodeId))
+       {
+          // Recieved a NMT Command from the CANOpen master
+          NMTCommand command = nmtCommandFromFrame(rxFrame);
+          switch (command)
+          {
+          case START_NETWORK_NODE:
+              DEBUG_PRINTLN("START_NETWORK_NODE");
+              nmt.state = NMTState::OPERATIONAL;
+              // end();
+              // begin(TWAI_MODE_NORMAL);
+              break;
+          case STOP_NETWORK_NODE:
+              DEBUG_PRINTLN("STOP_NETWORK_NODE");
+              nmt.state = NMTState::DISCONNECTED;
+              // end();
+              // begin(TWAI_MODE_LISTEN_ONLY);
+              break;
+          case GO_TO_PRE_OPERATIONAL:
+              DEBUG_PRINTLN("GO_TO_PRE_OPERATIONAL");
+              nmt.state = NMTState::PRE_OPERATIONAL;
+              // end();
+              // begin(TWAI_MODE_NORMAL);
+              break;
+          case RESET_COMMUNICATION:
+              DEBUG_PRINTLN("Received CANOpen NMT command to reset communication");
+              nmt.state = NMTState::DISCONNECTED;
+               // end();
+               // begin(TWAI_MODE_LISTEN_ONLY);
+              break;
+          case RESET_NODE:
+              DEBUG_PRINTLN("Received CANOpen NMT command to reset node. Restarting...");
+              // ESP.restart();
+              break;
+          case UNKNOWN:
+              // Fallthrough
+          default:
+              break;
+          }
+       }
+       else if (isBasicFunctionMainLightsAck(rxFrame))
+       {
+          if (CAR_LIGHTS_ON == getBasicFunctionMainLigthsAckSubFunction(rxFrame))
+          {
+            if (uiState.isMainLightsOn == false)
+            {
+              DEBUG_PRINTLN("Turn On Lights");
+              uiState.isMainLightsOn = true;
+            }
+          } else {
+            if (uiState.isMainLightsOn == true)
+            {
+              DEBUG_PRINTLN("Turn Off Lights");
+              uiState.isMainLightsOn = false;
+            }
+          }
+       }
+    }
+
+    if (shouldSendHeartbeat(currentTime, nmt, _nodeId) && _enabled && (transmitting == false))
+    {
+      DEBUG_PRINTF("Sending NMT Error Control frame with state %u \n", nmt.state);
+      twai_message_t frame = buildNmtErrorControlFrame(nmt.state, _nodeId);
+      transmitting = true;
+      esp_err_t e = twai_transmit(&frame, pdMS_TO_TICKS(1000));
+      if (e != ESP_OK)
+      {
+        DEBUG_PRINTF("Failed to send NMT Error Control frame! Error code %u \n", e);
+      }
+      nmt.lastSentHeartbeat = currentTime;
+    }    
+
+    // Map business states to UI
+    uiState.statusLed = (nmt.state == NMTState::PRE_OPERATIONAL) || (nmt.state == NMTState::OPERATIONAL);
+    if (currentTime <= (nmt.lastReceivedHeartbeat + 100))
+    {
+      uiState.heartbeatLed = HIGH;
     }
     else
     {
-        if (statusState == HIGH)
-        {
-            // Going from state running to heartbeat timeout
-            statusState = LOW;
-            heartbeatState = LOW;
-            digitalWrite(LED_GPIO_ERROR, HIGH);
-            digitalWrite(LED_GPIO_STATUS, LOW);
-            digitalWrite(LED_GPIO_HEARTBEAT, LOW);
-        }
+      uiState.heartbeatLed = LOW;
     }
     
+    // Update UI
+    digitalWrite(LED_GPIO_ERROR, uiState.errorLed);
+    digitalWrite(LED_GPIO_STATUS,uiState.statusLed);
+    digitalWrite(LED_GPIO_HEARTBEAT, uiState.heartbeatLed);
 
-    while(readFrame(&rxFrame, CAN_READ_TIMEOUT))
-    {
-       if(rxFrame.identifier == (R_PDO4 | nodeId))
-       {
-            if (isColorMpdo())
-            {
-                // A request for setting current RGB(W) primary color
-                byte white = rxFrame.data[7];
-                byte red =rxFrame.data[6];
-                byte green = rxFrame.data[5];
-                byte blue = rxFrame.data[4];
-
-                col[0] = red;
-                col[1] = green;
-                col[2] = blue;
-                col[3] = white;
-
-                colorUpdated(CALL_MODE_BUTTON);
-            }
-            else if (isFadeTimeMpdo())
-            {
-                // A request set fade time
-                byte lsb = rxFrame.data[4];
-                byte msb = rxFrame.data[5];
-                transitionDelay = ((uint16_t)(msb) << 8) | (uint16_t)lsb;
-                
-            }
-            else if (isEffectMpdo())
-            {
-                // A request to set effect
-                effectCurrent = rxFrame.data[4];
-                stateChanged = true;
-                
-                colorUpdated(CALL_MODE_BUTTON);
-            }
-       }
-       else if (rxFrame.identifier == HEARTBEAT_COB_ID)
-       {
-            if (rxFrame.data[0] == NMT_ERROR_CONTROL_STATE_OPERATIONAL)
-            {
-                // DEBUG_PRINTLN("Received CANOpen heartbeat");
-                if (heartbeatState == LOW)
-                {
-                    heartbeatState = HIGH;
-                }
-                else
-                {
-                    heartbeatState = LOW;
-                }
-                digitalWrite(LED_GPIO_HEARTBEAT, heartbeatState);
-                lastHeartbeat = millis();
-            }
-       }
-    }
+    
   }
 
 
@@ -333,15 +270,16 @@ public:
       }
 
       // Create or access the "CANOpen" object within "u"
-      JsonObject canOpen = user[PSTR(CanopenUsermod::_name)];
+      JsonObject canOpen = user[PSTR(_NAME_STR
+  )];
       if (canOpen.isNull()) {
-          canOpen = user.createNestedObject(FPSTR(CanopenUsermod::_name));
+          canOpen = user.createNestedObject(FPSTR(_NAME_STR));
       }
 
       // Add the "NodeId" entry to the "CANOpen" object
-      canOpen[FPSTR(CanopenUsermod::_node_id)] = nodeId;
+      canOpen[FPSTR(_NODE_ID_STR)] = _nodeId;
       // Add the "Controller NodeId" entry to the "CANOpen" object
-      canOpen[FPSTR(CanopenUsermod::_controller_id)] = controllerNodeId;
+      canOpen[FPSTR(_CONTROLLER_ID_STR)] = _controllerNodeId;
     }
 
 
@@ -352,10 +290,10 @@ public:
      */
     void addToConfig(JsonObject& root)
     {
-      JsonObject top = root.createNestedObject(FPSTR(_name));
-      top[FPSTR(_enabled)] = enabled;
-      top[FPSTR(_node_id)] = nodeId;
-      top[FPSTR(_controller_id)] = controllerNodeId;
+      JsonObject top = root.createNestedObject(FPSTR(_NAME_STR));
+      top[FPSTR(_ENABLED_STR)] = _enabled;
+      top[FPSTR(_NODE_ID_STR)] = _nodeId;
+      top[FPSTR(_CONTROLLER_ID_STR)] = _controllerNodeId;
     }
 
 
@@ -375,13 +313,13 @@ public:
      */
     bool readFromConfig(JsonObject& root)
     {
-      JsonObject top = root[FPSTR(_name)];
+      JsonObject top = root[FPSTR(_NAME_STR)];
 
       bool configComplete = !top.isNull();
-      configComplete &= getJsonValue(top[FPSTR(_enabled)], enabled, true);
-      configComplete &= getJsonValue(top[FPSTR(_node_id)], nodeId, DEFAULT_NODE_ID);
-      configComplete &= getJsonValue(top[FPSTR(_controller_id)], controllerNodeId, DEFAULT_CONTROLLER_NODE_ID);
-
+      configComplete &= getJsonValue(top[FPSTR(_ENABLED_STR)], _enabled, true);
+      configComplete &= getJsonValue(top[FPSTR(_NODE_ID_STR)], _nodeId, DEFAULT_NODE_ID);
+      configComplete &= getJsonValue(top[FPSTR(_CONTROLLER_ID_STR)], _controllerNodeId, DEFAULT_CONTROLLER_NODE_ID);
+     
       return configComplete;
     }
 
@@ -397,7 +335,7 @@ public:
 };
 
 // add more strings here to reduce flash memory usage
-const char CanopenUsermod::_name[]    PROGMEM = "CANOpen";
-const char CanopenUsermod::_enabled[] PROGMEM = "Enabled";
-const char CanopenUsermod::_node_id[] PROGMEM = "NodeId";
-const char CanopenUsermod::_controller_id[] PROGMEM = "NodeId of Controller";
+const char CanopenUsermod::_NAME_STR[]    PROGMEM = "CANOpen";
+const char CanopenUsermod::_ENABLED_STR[] PROGMEM = "Enabled";
+const char CanopenUsermod::_NODE_ID_STR[] PROGMEM = "NodeId";
+const char CanopenUsermod::_CONTROLLER_ID_STR[] PROGMEM = "NodeId of Controller";
